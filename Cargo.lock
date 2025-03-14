@@ -2594,6 +2594,7 @@ dependencies = [
  "fontique",
  "hashbrown",
  "peniko",
+ "serde",
  "skrifa",
  "swash",
  "tiny-skia",

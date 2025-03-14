@@ -10,6 +10,7 @@ use swash::text::cluster::Whitespace;
 ///
 /// See [`Cluster::from_point`].
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub enum ClusterSide {
     /// Cluster was hit on the left half.
     Left,
@@ -397,6 +398,7 @@ impl<'a, B: Brush> Cluster<'a, B> {
 
 /// Determines how a cursor attaches to a cluster.
 #[derive(Copy, Clone, PartialEq, Eq, Default, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub enum Affinity {
     /// Cursor is attached to the character that is logically following in the
     /// text stream.
@@ -419,6 +421,7 @@ impl Affinity {
 
 /// Index based path to a cluster.
 #[derive(Copy, Clone, PartialEq, Eq, Default, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct ClusterPath {
     line_index: u32,
     run_index: u32,

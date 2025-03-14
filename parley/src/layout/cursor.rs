@@ -16,6 +16,7 @@ use swash::text::cluster::Whitespace;
 
 /// Defines a position with a text layout.
 #[derive(Copy, Clone, PartialEq, Eq, Default, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct Cursor {
     index: usize,
     affinity: Affinity,
@@ -35,6 +36,13 @@ impl Cursor {
                 affinity: Affinity::Upstream,
             }
         }
+    }
+
+    /// Creates a new cursor from the given byte index and affinity. Does not
+    /// adjust the affinity to account for line breaks or ensure that the cursor
+    /// is inbounds.
+    pub fn from_byte_index_unchecked(index: usize, affinity: Affinity) -> Self {
+        Self { index, affinity }
     }
 
     /// Creates a new cursor from the given coordinates.
@@ -424,6 +432,7 @@ impl Cursor {
 
 /// Defines a range within a text layout.
 #[derive(Copy, Clone, Default, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct Selection {
     anchor: Cursor,
     focus: Cursor,
@@ -924,6 +933,7 @@ impl From<Cursor> for Selection {
 }
 
 #[derive(Copy, Clone, Default, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 enum AnchorBase {
     #[default]
     Cluster,
