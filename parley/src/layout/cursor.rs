@@ -462,6 +462,20 @@ impl Selection {
         Cursor::from_point(layout, x, y).into()
     }
 
+    pub fn from_parts(
+        anchor: Cursor,
+        focus: Cursor,
+        anchor_base: AnchorBase,
+        h_pos: Option<f32>,
+    ) -> Self {
+        Self {
+            anchor,
+            focus,
+            anchor_base,
+            h_pos,
+        }
+    }
+
     /// Creates a new selection bounding the word at the given coordinates.
     pub fn word_from_point<B: Brush>(layout: &Layout<B>, x: f32, y: f32) -> Self {
         if let Some((mut cluster, _)) = Cluster::from_point(layout, x, y) {
@@ -528,6 +542,16 @@ impl Selection {
     /// In a non-collapsed selection, this indicates the current position.
     pub fn focus(&self) -> Cursor {
         self.focus
+    }
+
+    /// Returns the stored horizontal position of the focus cursor, which is
+    /// preserved when navigating up and down lines.
+    pub fn h_pos(&self) -> Option<f32> {
+        self.h_pos
+    }
+
+    pub fn anchor_base(&self) -> AnchorBase {
+        self.anchor_base
     }
 
     /// Returns a new collapsed selection at the position of the current
@@ -934,7 +958,7 @@ impl From<Cursor> for Selection {
 
 #[derive(Copy, Clone, Default, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
-enum AnchorBase {
+pub enum AnchorBase {
     #[default]
     Cluster,
     Word(Cursor, Cursor),
