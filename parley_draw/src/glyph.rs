@@ -13,6 +13,7 @@ use crate::kurbo::{Affine, BezPath, Vec2};
 use crate::peniko::FontData;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use bytemuck::{ByteHash, NoUninit};
 use core::fmt::{Debug, Formatter};
 use core::ops::{Deref, RangeInclusive};
 use hashbrown::hash_map::{Entry, RawEntryMut};
@@ -1078,13 +1079,15 @@ impl GlyphCaches {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Default, Debug)]
+#[repr(C)]
+#[derive(Copy, Clone, PartialEq, Eq, NoUninit, ByteHash, Default, Debug)]
 struct OutlineKey {
     font_id: u64,
     font_index: u32,
     glyph_id: u32,
     size_bits: u32,
     hint: bool,
+    _pad: [u8; 3],
 }
 
 struct OutlineEntry {
@@ -1230,6 +1233,7 @@ impl<'a> OutlineCacheSession<'a> {
             font_index,
             size_bits: size.ppem().unwrap().to_bits(),
             hint: hinting_instance.is_some(),
+            _pad: Default::default(),
         };
 
         match self.map.entry(key) {
