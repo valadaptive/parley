@@ -178,61 +178,40 @@ impl<'a, 'b, Glyphs: Iterator<Item = Glyph> + Clone> GlyphRunRenderer<'a, 'b, Gl
         };
 
         for glyph in self.glyph_iterator.clone() {
-            let bitmap_data = bitmap_strikes
-                .glyph_for_size(
-                    Size::new(self.prepared_run.font_size),
-                    GlyphId::new(glyph.id),
-                )
-                .and_then(|g| match g.data {
-                    #[cfg(feature = "png")]
-                    BitmapData::Png(data) => Pixmap::from_png(data).ok().map(|d| (g, d)),
-                    #[cfg(not(feature = "png"))]
-                    BitmapData::Png(_) => None,
-                    // The others are not worth implementing for now (unless we can find a test case),
-                    // they should be very rare.
-                    BitmapData::Bgra(_) => None,
-                    BitmapData::Mask(_) => None,
-                });
-
-            let (glyph_type, transform) =
-                if let Some(color_glyph) = color_glyphs.get(GlyphId::new(glyph.id)) {
-                    prepare_colr_glyph(
-                        font_ref,
-                        glyph,
-                        self.prepared_run.font_size,
-                        upem,
-                        initial_transform,
-                        color_glyph,
-                        normalized_coords,
-                    )
-                } else if let Some((bitmap_glyph, pixmap)) = bitmap_data {
-                    prepare_bitmap_glyph(
-                        bitmap_strikes,
-                        glyph,
-                        pixmap,
-                        self.prepared_run.font_size,
-                        upem,
-                        initial_transform,
-                        bitmap_glyph,
-                    )
-                } else {
-                    let Some(outline) = outline_glyphs.get(GlyphId::new(glyph.id)) else {
-                        continue;
-                    };
-
-                    prepare_outline_glyph(
-                        glyph,
-                        font_id,
-                        font_ref.ttc_index().unwrap_or_default(),
-                        &mut outline_cache_session,
-                        hinted_size,
-                        initial_transform,
-                        self.prepared_run.run_transform,
-                        &outline,
-                        hinting_instance,
-                        normalized_coords,
-                    )
-                };
+            let (glyph_type, transform) = if let Some(prepared) = prepare_outline_glyph(
+                glyph,
+                font_id,
+                font_ref.ttc_index().unwrap_or_default(),
+                &mut outline_cache_session,
+                hinted_size,
+                initial_transform,
+                self.prepared_run.run_transform,
+                &outline_glyphs,
+                hinting_instance,
+                normalized_coords,
+            ) {
+                prepared
+            } else if let Some(prepared) = prepare_colr_glyph(
+                font_ref,
+                glyph,
+                self.prepared_run.font_size,
+                upem,
+                initial_transform,
+                color_glyphs,
+                normalized_coords,
+            ) {
+                prepared
+            } else if let Some(prepared) = prepare_bitmap_glyph(
+                bitmap_strikes,
+                glyph,
+                self.prepared_run.font_size,
+                upem,
+                initial_transform,
+            ) {
+                prepared
+            } else {
+                continue;
+            };
 
             let prepared_glyph = PreparedGlyph {
                 glyph_type,
@@ -318,20 +297,18 @@ impl<'a, 'b, Glyphs: Iterator<Item = Glyph> + Clone> GlyphRunRenderer<'a, 'b, Gl
         exclusions.truncate(0);
 
         for glyph in self.glyph_iterator.clone() {
-            // TODO: skip ink for color and bitmap glyphs
-            let Some(outline) = outline_glyphs.get(GlyphId::new(glyph.id)) else {
-                continue;
-            };
-
-            let path = outline_cache_session.get_or_insert(
+            let Some(path) = outline_cache_session.get_or_insert(
                 glyph.id,
                 font_id,
                 font_ref.ttc_index().unwrap_or_default(),
                 hinted_size,
                 var_key,
-                &outline,
+                &outline_glyphs,
                 hinting_instance,
-            );
+            ) else {
+                // TODO: skip ink for color and bitmap glyphs
+                continue;
+            };
 
             // If the glyph's bounding box doesn't intersect the underline at all, we don't need to calculate
             // intersections. This saves a lot of time, since most glyphs don't have descenders.
@@ -584,19 +561,19 @@ fn prepare_outline_glyph<'a>(
     initial_transform: Affine,
     // The transform of the run, without the per-glyph transform.
     run_transform: Affine,
-    outline_glyph: &skrifa::outline::OutlineGlyph<'a>,
+    outlines: &OutlineGlyphCollection<'a>,
     hinting_instance: Option<&HintingInstance>,
     normalized_coords: &[skrifa::instance::NormalizedCoord],
-) -> (GlyphType<'a>, Affine) {
+) -> Option<(GlyphType<'a>, Affine)> {
     let path = outline_cache.get_or_insert(
         glyph.id,
         font_id,
         font_index,
         size,
         VarLookupKey(normalized_coords),
-        outline_glyph,
+        outlines,
         hinting_instance,
-    );
+    )?;
 
     // Calculate the global glyph translation based on the glyph's local position within
     // the run and the run's global transform.
@@ -623,21 +600,32 @@ fn prepare_outline_glyph<'a>(
         final_transform[5] = final_transform[5].round();
     }
 
-    (
+    Some((
         GlyphType::Outline(OutlineGlyph { path: &path.path }),
         Affine::new(final_transform),
-    )
+    ))
 }
 
 fn prepare_bitmap_glyph<'a>(
     bitmaps: &BitmapStrikes<'_>,
     glyph: Glyph,
-    pixmap: Pixmap,
     font_size: f32,
     upem: f32,
     initial_transform: Affine,
-    bitmap_glyph: skrifa::bitmap::BitmapGlyph<'a>,
-) -> (GlyphType<'a>, Affine) {
+) -> Option<(GlyphType<'a>, Affine)> {
+    let (bitmap_glyph, pixmap) = bitmaps
+        .glyph_for_size(Size::new(font_size), GlyphId::new(glyph.id))
+        .and_then(|g| match g.data {
+            #[cfg(feature = "png")]
+            BitmapData::Png(data) => Pixmap::from_png(data).ok().map(|d| (g, d)),
+            #[cfg(not(feature = "png"))]
+            BitmapData::Png(_) => None,
+            // The others are not worth implementing for now (unless we can find a test case),
+            // they should be very rare.
+            BitmapData::Bgra(_) => None,
+            BitmapData::Mask(_) => None,
+        })?;
+
     let x_scale_factor = font_size / bitmap_glyph.ppem_x;
     let y_scale_factor = font_size / bitmap_glyph.ppem_y;
     let font_units_to_size = font_size / upem;
@@ -687,7 +675,7 @@ fn prepare_bitmap_glyph<'a>(
         f64::from(pixmap.height()),
     );
 
-    (GlyphType::Bitmap(BitmapGlyph { pixmap, area }), transform)
+    Some((GlyphType::Bitmap(BitmapGlyph { pixmap, area }), transform))
 }
 
 fn prepare_colr_glyph<'a>(
@@ -696,9 +684,10 @@ fn prepare_colr_glyph<'a>(
     font_size: f32,
     upem: f32,
     run_transform: Affine,
-    color_glyph: skrifa::color::ColorGlyph<'a>,
+    color_glyphs: &ColorGlyphCollection<'a>,
     normalized_coords: &'a [skrifa::instance::NormalizedCoord],
-) -> (GlyphType<'a>, Affine) {
+) -> Option<(GlyphType<'a>, Affine)> {
+    let color_glyph = color_glyphs.get(GlyphId::new(glyph.id))?;
     // A couple of notes on the implementation here:
     //
     // Firstly, COLR glyphs, similarly to normal outline
@@ -771,7 +760,7 @@ fn prepare_colr_glyph<'a>(
     // of the area we want to draw to.
     let area = Rect::new(0.0, 0.0, scaled_bbox.width(), scaled_bbox.height());
 
-    (
+    Some((
         GlyphType::Colr(Box::new(ColorGlyph {
             skrifa_glyph: color_glyph,
             font_ref,
@@ -782,7 +771,7 @@ fn prepare_colr_glyph<'a>(
             draw_transform,
         })),
         glyph_transform,
-    )
+    ))
 }
 
 /// Rendering style for glyphs.
@@ -1091,12 +1080,12 @@ struct OutlineKey {
 }
 
 struct OutlineEntry {
-    path: OutlinePath,
+    path: Option<OutlinePath>,
     serial: u32,
 }
 
 impl OutlineEntry {
-    const fn new(path: OutlinePath, serial: u32) -> Self {
+    const fn new(path: Option<OutlinePath>, serial: u32) -> Self {
         Self { path, serial }
     }
 }
@@ -1153,7 +1142,9 @@ impl OutlineCache {
         self.static_map.retain(|_, entry| {
             if serial - entry.serial > MAX_ENTRY_AGE {
                 if free_list.len() < MAX_FREE_LIST_SIZE {
-                    free_list.push(core::mem::take(&mut entry.path));
+                    if let Some(path) = core::mem::take(&mut entry.path) {
+                        free_list.push(path);
+                    }
                 }
                 self.cached_count -= 1;
                 false
@@ -1165,7 +1156,9 @@ impl OutlineCache {
             map.retain(|_, entry| {
                 if serial - entry.serial > MAX_ENTRY_AGE {
                     if free_list.len() < MAX_FREE_LIST_SIZE {
-                        free_list.push(core::mem::take(&mut entry.path));
+                        if let Some(path) = core::mem::take(&mut entry.path) {
+                            free_list.push(path);
+                        }
                     }
                     self.cached_count -= 1;
                     false
@@ -1224,9 +1217,9 @@ impl<'a> OutlineCacheSession<'a> {
         font_index: u32,
         size: Size,
         var_key: VarLookupKey<'_>,
-        outline_glyph: &skrifa::outline::OutlineGlyph<'_>,
+        outlines: &OutlineGlyphCollection<'_>,
         hinting_instance: Option<&HintingInstance>,
-    ) -> &OutlinePath {
+    ) -> Option<&OutlinePath> {
         let key = OutlineKey {
             glyph_id,
             font_id,
@@ -1239,7 +1232,7 @@ impl<'a> OutlineCacheSession<'a> {
         match self.map.entry(key) {
             Entry::Occupied(mut entry) => {
                 entry.get_mut().serial = self.serial;
-                &entry.into_mut().path
+                entry.into_mut().path.as_ref()
             }
             Entry::Vacant(entry) => {
                 let mut path = self.free_list.pop().unwrap_or_default();
@@ -1250,12 +1243,16 @@ impl<'a> OutlineCacheSession<'a> {
                     DrawSettings::unhinted(size, var_key.0)
                 };
 
-                path.reuse();
-                outline_glyph.draw(draw_settings, &mut path).unwrap();
+                let outline_glyph = outlines.get(glyph_id.into());
+                let path = outline_glyph.map(|outline_glyph| {
+                    path.reuse();
+                    outline_glyph.draw(draw_settings, &mut path).unwrap();
+                    path
+                });
 
                 let entry = entry.insert(OutlineEntry::new(path, self.serial));
                 *self.cached_count += 1;
-                &entry.path
+                entry.path.as_ref()
             }
         }
     }
