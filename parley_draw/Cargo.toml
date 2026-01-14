@@ -29,5 +29,7 @@ bytemuck = { workspace = true }
 hashbrown = { workspace = true }
 skrifa = { workspace = true }
 smallvec = { workspace = true }
+stable_deref_trait = { workspace = true }
 vello_common = { workspace = true }
 vello_cpu = { workspace = true, optional = true }
+yoke = { workspace = true, features = ["derive"] }

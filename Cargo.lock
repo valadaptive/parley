@@ -3389,8 +3389,10 @@ dependencies = [
  "hashbrown 0.16.1",
  "skrifa 0.37.0",
  "smallvec",
+ "stable_deref_trait",
  "vello_common",
  "vello_cpu",
+ "yoke",
 ]
 
 [[package]]

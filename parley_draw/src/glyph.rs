@@ -14,9 +14,10 @@ use crate::peniko::FontData;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt::{Debug, Formatter};
-use core::ops::RangeInclusive;
+use core::ops::{Deref, RangeInclusive};
 use hashbrown::hash_map::{Entry, RawEntryMut};
 use hashbrown::{Equivalent, HashMap};
+use skrifa::color::ColorGlyphCollection;
 use skrifa::instance::{LocationRef, Size};
 use skrifa::outline::{DrawSettings, OutlineGlyphFormat};
 use skrifa::raw::TableProvider;
@@ -25,6 +26,9 @@ use skrifa::{
     GlyphId, MetadataProvider,
     outline::{HintingInstance, HintingOptions, OutlinePen},
 };
+use stable_deref_trait::StableDeref;
+use vello_cpu::peniko::Blob;
+use yoke::{Yoke, Yokeable};
 
 use crate::Pixmap;
 use crate::colr::convert_bounding_box;
@@ -146,13 +150,14 @@ impl<'a, 'b, Glyphs: Iterator<Item = Glyph> + Clone> GlyphRunRenderer<'a, 'b, Gl
     }
 
     fn draw_glyphs(&mut self, style: Style, renderer: &mut impl GlyphRenderer) {
-        let font_ref = self.prepared_run.font.as_skrifa();
-
+        let font_id = self.prepared_run.font_data.backing_cart().0.id();
+        let PreParsedFontData {
+            font_ref,
+            outline_glyphs,
+            color_glyphs,
+            bitmap_strikes,
+        } = self.prepared_run.font_data.get();
         let upem: f32 = font_ref.head().map(|h| h.units_per_em()).unwrap().into();
-
-        let outlines = font_ref.outline_glyphs();
-        let color_glyphs = font_ref.color_glyphs();
-        let bitmaps = font_ref.bitmap_strikes();
 
         let mut outline_cache_session = OutlineCacheSession::new(
             self.outline_cache,
@@ -172,7 +177,7 @@ impl<'a, 'b, Glyphs: Iterator<Item = Glyph> + Clone> GlyphRunRenderer<'a, 'b, Gl
         };
 
         for glyph in self.glyph_iterator.clone() {
-            let bitmap_data = bitmaps
+            let bitmap_data = bitmap_strikes
                 .glyph_for_size(
                     Size::new(self.prepared_run.font_size),
                     GlyphId::new(glyph.id),
@@ -191,7 +196,7 @@ impl<'a, 'b, Glyphs: Iterator<Item = Glyph> + Clone> GlyphRunRenderer<'a, 'b, Gl
             let (glyph_type, transform) =
                 if let Some(color_glyph) = color_glyphs.get(GlyphId::new(glyph.id)) {
                     prepare_colr_glyph(
-                        &font_ref,
+                        font_ref,
                         glyph,
                         self.prepared_run.font_size,
                         upem,
@@ -201,7 +206,7 @@ impl<'a, 'b, Glyphs: Iterator<Item = Glyph> + Clone> GlyphRunRenderer<'a, 'b, Gl
                     )
                 } else if let Some((bitmap_glyph, pixmap)) = bitmap_data {
                     prepare_bitmap_glyph(
-                        &bitmaps,
+                        bitmap_strikes,
                         glyph,
                         pixmap,
                         self.prepared_run.font_size,
@@ -210,14 +215,14 @@ impl<'a, 'b, Glyphs: Iterator<Item = Glyph> + Clone> GlyphRunRenderer<'a, 'b, Gl
                         bitmap_glyph,
                     )
                 } else {
-                    let Some(outline) = outlines.get(GlyphId::new(glyph.id)) else {
+                    let Some(outline) = outline_glyphs.get(GlyphId::new(glyph.id)) else {
                         continue;
                     };
 
                     prepare_outline_glyph(
                         glyph,
-                        self.prepared_run.font.data.id(),
-                        self.prepared_run.font.index,
+                        font_id,
+                        font_ref.ttc_index().unwrap_or_default(),
                         &mut outline_cache_session,
                         hinted_size,
                         initial_transform,
@@ -268,8 +273,12 @@ impl<'a, 'b, Glyphs: Iterator<Item = Glyph> + Clone> GlyphRunRenderer<'a, 'b, Gl
         size: f32,
         buffer: f32,
     ) -> impl Iterator<Item = Rect> + 'c {
-        let font_ref = self.prepared_run.font.as_skrifa();
-        let outlines = font_ref.outline_glyphs();
+        let font_id = self.prepared_run.font_data.backing_cart().0.id();
+        let PreParsedFontData {
+            font_ref,
+            outline_glyphs,
+            ..
+        } = self.prepared_run.font_data.get();
 
         let PreparedGlyphRun {
             hinted_size,
@@ -309,14 +318,14 @@ impl<'a, 'b, Glyphs: Iterator<Item = Glyph> + Clone> GlyphRunRenderer<'a, 'b, Gl
 
         for glyph in self.glyph_iterator.clone() {
             // TODO: skip ink for color and bitmap glyphs
-            let Some(outline) = outlines.get(GlyphId::new(glyph.id)) else {
+            let Some(outline) = outline_glyphs.get(GlyphId::new(glyph.id)) else {
                 continue;
             };
 
             let path = outline_cache_session.get_or_insert(
                 glyph.id,
-                self.prepared_run.font.data.id(),
-                self.prepared_run.font.index,
+                font_id,
+                font_ref.ttc_index().unwrap_or_default(),
                 hinted_size,
                 var_key,
                 &outline,
@@ -775,16 +784,6 @@ fn prepare_colr_glyph<'a>(
     )
 }
 
-trait FontDataExt {
-    fn as_skrifa(&self) -> FontRef<'_>;
-}
-
-impl FontDataExt for FontData {
-    fn as_skrifa(&self) -> FontRef<'_> {
-        FontRef::from_index(self.data.data(), self.index).unwrap()
-    }
-}
-
 /// Rendering style for glyphs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Style {
@@ -812,9 +811,33 @@ struct GlyphRun<'a> {
     hint: bool,
 }
 
+#[derive(Yokeable)]
+struct PreParsedFontData<'a> {
+    font_ref: FontRef<'a>,
+    outline_glyphs: OutlineGlyphCollection<'a>,
+    color_glyphs: ColorGlyphCollection<'a>,
+    bitmap_strikes: BitmapStrikes<'a>,
+}
+
+#[derive(Clone, Debug)]
+struct FontBlob(Blob<u8>);
+
+#[allow(
+    unsafe_code,
+    reason = "This isn't yet implemented in linebender_resource_handle (https://github.com/linebender/raw_resource_handle/pull/14)"
+)]
+unsafe impl StableDeref for FontBlob {}
+
+impl Deref for FontBlob {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.0.data()
+    }
+}
+
 struct PreparedGlyphRun<'a> {
-    /// The underlying font data.
-    font: FontData,
+    font_data: Yoke<PreParsedFontData<'static>, FontBlob>,
     /// The font size, prior to any scaling.
     font_size: f32,
     /// The run transform.
@@ -835,7 +858,6 @@ impl Debug for PreparedGlyphRun<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         // HintingInstance doesn't implement Debug so we have to do this manually :(
         f.debug_struct("PreparedGlyphRun")
-            .field("font", &self.font)
             .field("font_size", &self.font_size)
             .field("run_transform", &self.run_transform)
             .field("glyph_transform", &self.glyph_transform)
@@ -852,9 +874,22 @@ impl Debug for PreparedGlyphRun<'_> {
 /// for proper font hinting when enabled and possible.
 fn prepare_glyph_run<'a>(run: GlyphRun<'a>, hint_cache: &'a mut HintCache) -> PreparedGlyphRun<'a> {
     let total_transform = run.transform * run.glyph_transform.unwrap_or(Affine::IDENTITY);
+    let font_id = run.font.data.id();
+    let font_index = run.font.index;
+    let font_blob = FontBlob(run.font.data);
+    let font_data: Yoke<PreParsedFontData<'static>, FontBlob> =
+        Yoke::attach_to_cart(font_blob, |blob: &[u8]| {
+            let font_ref = FontRef::from_index(blob, font_index).unwrap();
+            PreParsedFontData {
+                outline_glyphs: font_ref.outline_glyphs(),
+                color_glyphs: font_ref.color_glyphs(),
+                bitmap_strikes: font_ref.bitmap_strikes(),
+                font_ref,
+            }
+        });
     if !run.hint {
         return PreparedGlyphRun {
-            font: run.font,
+            font_data,
             font_size: run.font_size,
             run_transform: run.transform,
             glyph_transform: run.glyph_transform,
@@ -864,9 +899,6 @@ fn prepare_glyph_run<'a>(run: GlyphRun<'a>, hint_cache: &'a mut HintCache) -> Pr
             hinting_instance: None,
         };
     }
-
-    let font_ref = run.font.as_skrifa();
-    let outlines = font_ref.outline_glyphs();
 
     // We perform vertical-only hinting.
     //
@@ -888,15 +920,15 @@ fn prepare_glyph_run<'a>(run: GlyphRun<'a>, hint_cache: &'a mut HintCache) -> Pr
         let size = Size::new(vertical_font_size);
 
         let hinting_instance = hint_cache.get(&HintKey {
-            font_id: run.font.data.id(),
-            font_index: run.font.index,
-            outlines: &outlines,
+            font_id,
+            font_index,
+            outlines: &font_data.get().outline_glyphs,
             size,
             coords: run.normalized_coords,
         });
 
         PreparedGlyphRun {
-            font: run.font,
+            font_data,
             font_size: run.font_size,
             run_transform: run.transform,
             glyph_transform: run.glyph_transform,
@@ -907,7 +939,7 @@ fn prepare_glyph_run<'a>(run: GlyphRun<'a>, hint_cache: &'a mut HintCache) -> Pr
         }
     } else {
         PreparedGlyphRun {
-            font: run.font,
+            font_data,
             font_size: run.font_size,
             run_transform: run.transform,
             glyph_transform: run.glyph_transform,
